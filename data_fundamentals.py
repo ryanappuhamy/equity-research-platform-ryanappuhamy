@@ -23,39 +23,57 @@ FMP_BASE = "https://financialmodelingprep.com/api/v3"
 # ---------------------------------------------------------------------------
 
 def get_price_history(ticker: str, years: int = config.PRICE_LOOKBACK_YEARS) -> pd.DataFrame:
-    """Daily OHLCV history for the ticker."""
-    data = yf.download(ticker, period=f"{years}y", auto_adjust=True, progress=False)
-    if data.empty:
-        raise ValueError(f"No price data found for {ticker}")
-    # yfinance may return MultiIndex columns for single ticker; flatten
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
-    return data
+    """Daily OHLCV history for the ticker. Returns empty DataFrame on failure."""
+    try:
+        data = yf.download(ticker, period=f"{years}y", auto_adjust=True, progress=False)
+        if data.empty:
+            print(f"[error] yfinance returned empty price data for {ticker}")
+            return pd.DataFrame()
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+        return data
+    except Exception as e:
+        print(f"[error] yfinance price history failed for {ticker}: {e}")
+        return pd.DataFrame()
 
 
-def get_price_stats(prices: pd.DataFrame) -> dict:
-    """Objective price-derived statistics."""
-    close = prices["Close"].dropna()
-    daily_ret = close.pct_change().dropna()
+def get_price_stats(prices: pd.DataFrame, ticker: str = "") -> dict:
+    """Objective price-derived statistics. Returns available=False if data missing."""
+    label = ticker or "ticker"
+    try:
+        if prices is None or prices.empty or "Close" not in prices.columns:
+            note = f"No price data available for {label}"
+            print(f"[error] {note}")
+            return {"available": False, "note": note}
 
-    ann_return = daily_ret.mean() * 252
-    ann_vol = daily_ret.std() * (252 ** 0.5)
-    sharpe = (ann_return - config.RISK_FREE_RATE) / ann_vol if ann_vol > 0 else None
+        close = prices["Close"].dropna()
+        if close.empty:
+            note = f"No valid closing prices for {label}"
+            print(f"[error] {note}")
+            return {"available": False, "note": note}
 
-    # Max drawdown
-    cummax = close.cummax()
-    drawdown = (close / cummax - 1).min()
+        daily_ret = close.pct_change().dropna()
+        ann_return = daily_ret.mean() * 252
+        ann_vol = daily_ret.std() * (252 ** 0.5)
+        sharpe = (ann_return - config.RISK_FREE_RATE) / ann_vol if ann_vol > 0 else None
+        cummax = close.cummax()
+        drawdown = (close / cummax - 1).min()
 
-    return {
-        "last_price": round(float(close.iloc[-1]), 2),
-        "return_1y": round(float(close.iloc[-1] / close.iloc[-min(252, len(close))] - 1), 4),
-        "annualized_return": round(float(ann_return), 4),
-        "annualized_volatility": round(float(ann_vol), 4),
-        "sharpe_ratio": round(float(sharpe), 2) if sharpe is not None else None,
-        "max_drawdown": round(float(drawdown), 4),
-        "high_52w": round(float(close.iloc[-252:].max()), 2) if len(close) >= 252 else None,
-        "low_52w": round(float(close.iloc[-252:].min()), 2) if len(close) >= 252 else None,
-    }
+        return {
+            "available": True,
+            "last_price": round(float(close.iloc[-1]), 2),
+            "return_1y": round(float(close.iloc[-1] / close.iloc[-min(252, len(close))] - 1), 4),
+            "annualized_return": round(float(ann_return), 4),
+            "annualized_volatility": round(float(ann_vol), 4),
+            "sharpe_ratio": round(float(sharpe), 2) if sharpe is not None else None,
+            "max_drawdown": round(float(drawdown), 4),
+            "high_52w": round(float(close.iloc[-252:].max()), 2) if len(close) >= 252 else None,
+            "low_52w": round(float(close.iloc[-252:].min()), 2) if len(close) >= 252 else None,
+        }
+    except Exception as e:
+        note = f"Price stats calculation failed for {label}: {e}"
+        print(f"[error] {note}")
+        return {"available": False, "note": note}
 
 
 # ---------------------------------------------------------------------------
@@ -79,15 +97,23 @@ def get_fundamentals(ticker: str) -> dict:
         try:
             return _fundamentals_fmp(ticker)
         except Exception as e:
-            print(f"  [warn] FMP failed ({e}), falling back to yfinance")
-    return _fundamentals_yfinance(ticker)
+            print(f"[error] FMP fundamentals failed for {ticker}: {e}, falling back to yfinance")
+    try:
+        return _fundamentals_yfinance(ticker)
+    except Exception as e:
+        note = f"Fundamentals collection failed for {ticker}: {e}"
+        print(f"[error] {note}")
+        return {"available": False, "note": note}
 
 
 def _fundamentals_fmp(ticker: str) -> dict:
-    profile = _fmp_get(f"profile/{ticker}")[0]
-    ratios = _fmp_get(f"ratios-ttm/{ticker}")[0]
-    metrics = _fmp_get(f"key-metrics-ttm/{ticker}")[0]
-    income = _fmp_get(f"income-statement/{ticker}", {"limit": 5})
+    try:
+        profile = _fmp_get(f"profile/{ticker}")[0]
+        ratios = _fmp_get(f"ratios-ttm/{ticker}")[0]
+        metrics = _fmp_get(f"key-metrics-ttm/{ticker}")[0]
+        income = _fmp_get(f"income-statement/{ticker}", {"limit": 5})
+    except (IndexError, KeyError, TypeError) as e:
+        raise ValueError(f"FMP returned incomplete data for {ticker}: {e}") from e
 
     revenue_series = [q.get("revenue") for q in reversed(income)]
     rev_growth = None
@@ -95,6 +121,7 @@ def _fundamentals_fmp(ticker: str) -> dict:
         rev_growth = revenue_series[-1] / revenue_series[-2] - 1
 
     return {
+        "available": True,
         "source": "FMP",
         "company_name": profile.get("companyName"),
         "sector": profile.get("sector"),
@@ -118,30 +145,40 @@ def _fundamentals_fmp(ticker: str) -> dict:
 
 
 def _fundamentals_yfinance(ticker: str) -> dict:
-    t = yf.Ticker(ticker)
-    info = t.info or {}
+    try:
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+        if not info or not (info.get("longName") or info.get("shortName") or info.get("marketCap")):
+            note = f"yfinance returned empty fundamentals for {ticker}"
+            print(f"[error] {note}")
+            return {"available": False, "note": note}
 
-    return {
-        "source": "yfinance",
-        "company_name": info.get("longName"),
-        "sector": info.get("sector"),
-        "industry": info.get("industry"),
-        "market_cap": info.get("marketCap"),
-        "pe_ttm": info.get("trailingPE"),
-        "ev_ebitda": info.get("enterpriseToEbitda"),
-        "ev_revenue": info.get("enterpriseToRevenue"),
-        "price_to_book": info.get("priceToBook"),
-        "gross_margin": info.get("grossMargins"),
-        "operating_margin": info.get("operatingMargins"),
-        "net_margin": info.get("profitMargins"),
-        "roe": info.get("returnOnEquity"),
-        "roic": None,  # not provided by yfinance
-        "debt_to_equity": info.get("debtToEquity"),
-        "current_ratio": info.get("currentRatio"),
-        "revenue_growth_yoy": info.get("revenueGrowth"),
-        "fcf_yield": None,
-        "dividend_yield": info.get("dividendYield"),
-    }
+        return {
+            "available": True,
+            "source": "yfinance",
+            "company_name": info.get("longName"),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+            "market_cap": info.get("marketCap"),
+            "pe_ttm": info.get("trailingPE"),
+            "ev_ebitda": info.get("enterpriseToEbitda"),
+            "ev_revenue": info.get("enterpriseToRevenue"),
+            "price_to_book": info.get("priceToBook"),
+            "gross_margin": info.get("grossMargins"),
+            "operating_margin": info.get("operatingMargins"),
+            "net_margin": info.get("profitMargins"),
+            "roe": info.get("returnOnEquity"),
+            "roic": None,
+            "debt_to_equity": info.get("debtToEquity"),
+            "current_ratio": info.get("currentRatio"),
+            "revenue_growth_yoy": info.get("revenueGrowth"),
+            "fcf_yield": None,
+            "dividend_yield": info.get("dividendYield"),
+        }
+    except Exception as e:
+        note = f"yfinance fundamentals failed for {ticker}: {e}"
+        print(f"[error] {note}")
+        return {"available": False, "note": note}
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +197,7 @@ def get_peers(ticker: str) -> list[str]:
                 peers = data[0].get("peersList", [])
                 return peers[: config.PEER_COUNT]
         except Exception as e:
-            print(f"  [warn] FMP peers failed ({e})")
+            print(f"[error] FMP peers failed for {ticker}: {e}")
     return []
 
 
@@ -177,26 +214,32 @@ def get_analyst_data(ticker: str) -> dict:
     if not config.FMP_API_KEY:
         return {"available": False, "note": "Set FMP_API_KEY for analyst consensus data"}
 
-    out = {"available": True}
     try:
-        grades = _fmp_get(f"grade/{ticker}", {"limit": 10})
-        out["recent_rating_actions"] = [
-            {
-                "date": g.get("date"),
-                "firm": g.get("gradingCompany"),
-                "action": g.get("newGrade"),
-                "previous": g.get("previousGrade"),
-            }
-            for g in grades[:10]
-        ]
-    except Exception:
-        out["recent_rating_actions"] = []
+        out = {"available": True}
+        try:
+            grades = _fmp_get(f"grade/{ticker}", {"limit": 10})
+            out["recent_rating_actions"] = [
+                {
+                    "date": g.get("date"),
+                    "firm": g.get("gradingCompany"),
+                    "action": g.get("newGrade"),
+                    "previous": g.get("previousGrade"),
+                }
+                for g in grades[:10]
+            ]
+        except Exception as e:
+            print(f"[error] FMP rating actions failed for {ticker}: {e}")
+            out["recent_rating_actions"] = []
 
-    try:
-        pt = _fmp_get(f"price-target-consensus", {"symbol": ticker})
-        if pt:
-            out["price_target_consensus"] = pt[0]
-    except Exception:
-        out["price_target_consensus"] = None
+        try:
+            pt = _fmp_get(f"price-target-consensus", {"symbol": ticker})
+            out["price_target_consensus"] = pt[0] if pt else None
+        except Exception as e:
+            print(f"[error] FMP price target consensus failed for {ticker}: {e}")
+            out["price_target_consensus"] = None
 
-    return out
+        return out
+    except Exception as e:
+        note = f"Analyst data collection failed for {ticker}: {e}"
+        print(f"[error] {note}")
+        return {"available": False, "note": note}

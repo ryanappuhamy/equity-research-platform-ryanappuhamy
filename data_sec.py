@@ -9,8 +9,8 @@ objective "smart money" signals available for free.
 """
 
 import requests
-import pandas as pd
 from datetime import datetime, timedelta
+from requests.exceptions import RequestException, Timeout
 
 SEC_HEADERS = {
     # SEC requires identification. Replace with your real contact.
@@ -20,14 +20,25 @@ SEC_HEADERS = {
 
 def _get_cik(ticker: str) -> str | None:
     """Map ticker -> CIK number using SEC's official mapping file."""
-    url = "https://www.sec.gov/files/company_tickers.json"
-    r = requests.get(url, headers=SEC_HEADERS, timeout=20)
-    r.raise_for_status()
-    data = r.json()
-    for entry in data.values():
-        if entry["ticker"].upper() == ticker.upper():
-            return str(entry["cik_str"]).zfill(10)
-    return None
+    try:
+        url = "https://www.sec.gov/files/company_tickers.json"
+        r = requests.get(url, headers=SEC_HEADERS, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        for entry in data.values():
+            if entry["ticker"].upper() == ticker.upper():
+                return str(entry["cik_str"]).zfill(10)
+        print(f"[error] SEC EDGAR: CIK not found for ticker {ticker}")
+        return None
+    except Timeout:
+        print(f"[error] SEC EDGAR: timeout fetching CIK mapping for {ticker}")
+        return None
+    except RequestException as e:
+        print(f"[error] SEC EDGAR: request failed fetching CIK for {ticker}: {e}")
+        return None
+    except Exception as e:
+        print(f"[error] SEC EDGAR: unexpected error fetching CIK for {ticker}: {e}")
+        return None
 
 
 def get_insider_activity(ticker: str, months_back: int = 6) -> dict:
@@ -66,5 +77,15 @@ def get_insider_activity(ticker: str, months_back: int = 6) -> dict:
                 "is not directional; v2 should parse buy vs sell from the XML."
             ),
         }
+    except Timeout:
+        note = f"SEC EDGAR timeout fetching insider activity for {ticker}"
+        print(f"[error] {note}")
+        return {"available": False, "note": note}
+    except RequestException as e:
+        note = f"SEC EDGAR request error for {ticker}: {e}"
+        print(f"[error] {note}")
+        return {"available": False, "note": note}
     except Exception as e:
-        return {"available": False, "note": f"SEC EDGAR error: {e}"}
+        note = f"SEC EDGAR error for {ticker}: {e}"
+        print(f"[error] {note}")
+        return {"available": False, "note": note}

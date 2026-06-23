@@ -9,6 +9,7 @@ import re
 from html import unescape
 
 import requests
+from requests.exceptions import RequestException, Timeout
 
 from data_sec import _get_cik, SEC_HEADERS
 
@@ -17,22 +18,26 @@ ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data"
 
 def _parse_index_exhibits(html: str) -> list[dict]:
     """Extract EX-99 exhibit rows from an SEC filing index page."""
-    rows = re.findall(r"<tr[^>]*>.*?</tr>", html, re.S | re.I)
-    exhibits = []
-    for row in rows:
-        if "EX-99" not in row.upper():
-            continue
-        texts = [t.strip() for t in re.findall(r">([^<]+)<", row) if t.strip()]
-        if len(texts) < 3:
-            continue
-        exhibits.append(
-            {
-                "type": texts[1],
-                "filename": texts[2],
-                "description": texts[3] if len(texts) > 3 else "",
-            }
-        )
-    return exhibits
+    try:
+        rows = re.findall(r"<tr[^>]*>.*?</tr>", html, re.S | re.I)
+        exhibits = []
+        for row in rows:
+            if "EX-99" not in row.upper():
+                continue
+            texts = [t.strip() for t in re.findall(r">([^<]+)<", row) if t.strip()]
+            if len(texts) < 3:
+                continue
+            exhibits.append(
+                {
+                    "type": texts[1],
+                    "filename": texts[2],
+                    "description": texts[3] if len(texts) > 3 else "",
+                }
+            )
+        return exhibits
+    except Exception as e:
+        print(f"[error] SEC EDGAR: failed to parse filing index: {e}")
+        return []
 
 
 def _exhibit_score(exhibit: dict) -> int:
@@ -53,30 +58,55 @@ def _exhibit_score(exhibit: dict) -> int:
 
 def _clean_html(html: str) -> str:
     """Strip HTML tags and normalize whitespace."""
-    text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
-    text = re.sub(r"(?s)<[^>]+>", " ", text)
-    text = unescape(text)
-    text = text.replace("\xa0", " ")
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    try:
+        text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        text = unescape(text)
+        text = text.replace("\xa0", " ")
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+    except Exception as e:
+        print(f"[error] SEC EDGAR: failed to clean HTML text: {e}")
+        return ""
 
 
 def _fetch_filing_index(cik_int: int, accession: str) -> str | None:
-    acc_nodash = accession.replace("-", "")
-    url = f"{ARCHIVES_BASE}/{cik_int}/{acc_nodash}/{accession}-index.htm"
-    r = requests.get(url, headers=SEC_HEADERS, timeout=20)
-    if r.status_code != 200:
+    try:
+        acc_nodash = accession.replace("-", "")
+        url = f"{ARCHIVES_BASE}/{cik_int}/{acc_nodash}/{accession}-index.htm"
+        r = requests.get(url, headers=SEC_HEADERS, timeout=20)
+        if r.status_code != 200:
+            return None
+        return r.text
+    except Timeout:
+        print(f"[error] SEC EDGAR: timeout fetching filing index for {accession}")
         return None
-    return r.text
+    except RequestException as e:
+        print(f"[error] SEC EDGAR: request failed fetching filing index for {accession}: {e}")
+        return None
+    except Exception as e:
+        print(f"[error] SEC EDGAR: unexpected error fetching filing index for {accession}: {e}")
+        return None
 
 
 def _download_exhibit(cik_int: int, accession: str, filename: str) -> str | None:
-    acc_nodash = accession.replace("-", "")
-    url = f"{ARCHIVES_BASE}/{cik_int}/{acc_nodash}/{filename}"
-    r = requests.get(url, headers=SEC_HEADERS, timeout=30)
-    if r.status_code != 200:
+    try:
+        acc_nodash = accession.replace("-", "")
+        url = f"{ARCHIVES_BASE}/{cik_int}/{acc_nodash}/{filename}"
+        r = requests.get(url, headers=SEC_HEADERS, timeout=30)
+        if r.status_code != 200:
+            print(f"[error] SEC EDGAR: exhibit download returned HTTP {r.status_code} for {filename}")
+            return None
+        return r.text
+    except Timeout:
+        print(f"[error] SEC EDGAR: timeout downloading exhibit {filename}")
         return None
-    return r.text
+    except RequestException as e:
+        print(f"[error] SEC EDGAR: request failed downloading exhibit {filename}: {e}")
+        return None
+    except Exception as e:
+        print(f"[error] SEC EDGAR: unexpected error downloading exhibit {filename}: {e}")
+        return None
 
 
 def get_earnings_transcript(ticker: str, max_filings: int = 40) -> dict:
@@ -88,7 +118,9 @@ def get_earnings_transcript(ticker: str, max_filings: int = 40) -> dict:
     try:
         cik = _get_cik(ticker)
         if cik is None:
-            return {"available": False, "note": f"CIK not found for {ticker}"}
+            note = f"CIK not found for {ticker}"
+            print(f"[error] SEC EDGAR transcript: {note}")
+            return {"available": False, "note": note}
 
         cik_int = int(cik)
         url = f"https://data.sec.gov/submissions/CIK{cik}.json"
@@ -122,21 +154,24 @@ def get_earnings_transcript(ticker: str, max_filings: int = 40) -> dict:
                 candidates.append((score, filing_date, accession, exhibit))
 
         if not candidates:
-            return {
-                "available": False,
-                "note": f"No EX-99 exhibits found in last {max_filings} 8-K filings",
-            }
+            note = f"No EX-99 exhibits found in last {max_filings} 8-K filings for {ticker}"
+            print(f"[error] SEC EDGAR transcript: {note}")
+            return {"available": False, "note": note}
 
         candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
         score, filing_date, accession, best = candidates[0]
 
         raw_html = _download_exhibit(cik_int, accession, best["filename"])
         if not raw_html:
-            return {"available": False, "note": "Failed to download earnings exhibit"}
+            note = f"Failed to download earnings exhibit for {ticker}"
+            print(f"[error] SEC EDGAR transcript: {note}")
+            return {"available": False, "note": note}
 
         cleaned = _clean_html(raw_html)
         if len(cleaned) < 500:
-            return {"available": False, "note": "Earnings exhibit text too short"}
+            note = f"Earnings exhibit text too short for {ticker} ({len(cleaned)} chars)"
+            print(f"[error] SEC EDGAR transcript: {note}")
+            return {"available": False, "note": note}
 
         is_transcript = score >= 90
         return {
@@ -156,5 +191,15 @@ def get_earnings_transcript(ticker: str, max_filings: int = 40) -> dict:
                 else "No explicit transcript exhibit found; using closest earnings-related EX-99."
             ),
         }
+    except Timeout:
+        note = f"SEC EDGAR timeout fetching transcript for {ticker}"
+        print(f"[error] {note}")
+        return {"available": False, "note": note}
+    except RequestException as e:
+        note = f"SEC EDGAR request error fetching transcript for {ticker}: {e}"
+        print(f"[error] {note}")
+        return {"available": False, "note": note}
     except Exception as e:
-        return {"available": False, "note": f"SEC EDGAR transcript error: {e}"}
+        note = f"SEC EDGAR transcript error for {ticker}: {e}"
+        print(f"[error] {note}")
+        return {"available": False, "note": note}
