@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+output/
+portfolio.db
+.env
+*.db
