@@ -2,6 +2,7 @@
 FastAPI wrapper for the equity research backend.
 """
 
+import logging
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
@@ -14,6 +15,8 @@ import portfolio
 import portfolio_risk
 from database import init_db
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(
     title="Equity Research API",
     description="Single-ticker research pipeline, portfolio tracking, and risk analysis",
@@ -23,7 +26,10 @@ app = FastAPI(
 
 @app.on_event("startup")
 def _startup() -> None:
-    init_db()
+    try:
+        init_db()
+    except Exception:
+        logger.exception("Database initialization failed; starting without database")
 
 
 class PositionInput(BaseModel):

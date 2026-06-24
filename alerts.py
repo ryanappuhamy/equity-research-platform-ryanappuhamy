@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String
 from sqlalchemy.orm import Session
 
-from database import Base, get_session, init_db
+from database import Base, get_session
 import main
 
 VALID_METRICS = frozenset({"pe_ttm", "price", "revenue_growth_yoy", "insider_filings"})

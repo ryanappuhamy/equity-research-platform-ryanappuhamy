@@ -9,7 +9,7 @@ import yfinance as yf
 from sqlalchemy import Column, DateTime, Float, Integer, String
 from sqlalchemy.orm import Session
 
-from database import Base, get_session, init_db
+from database import Base, get_session
 
 DEFAULT_PORTFOLIO_NAME = "default"
 
@@ -212,6 +212,3 @@ def _position_to_dict(pos: Position) -> dict:
         "avg_cost_price": pos.avg_cost_price,
         "updated_at": pos.updated_at.isoformat() if pos.updated_at else None,
     }
-
-
-init_db()
