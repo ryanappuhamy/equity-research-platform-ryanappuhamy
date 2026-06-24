@@ -8,6 +8,7 @@ Optional:
     FMP_API_KEY         -> Financial Modeling Prep (clean fundamentals, $14/mo plan)
     FRED_API_KEY        -> FRED macro data (free, register at fred.stlouisfed.org)
     FINNHUB_API_KEY     -> Finnhub analyst consensus, price targets, EPS estimates (free tier)
+    DATABASE_URL        -> PostgreSQL connection string (Supabase/Render); falls back to SQLite
 
 If FMP_API_KEY is missing, the system falls back to yfinance for fundamentals.
 """
@@ -42,3 +43,23 @@ FRED_SERIES = {
 # --- Output ---
 OUTPUT_DIR = "output"
 PORTFOLIO_DB = os.environ.get("PORTFOLIO_DB", "portfolio.db")
+
+
+def _normalize_database_url(url: str) -> str:
+    """Ensure SQLAlchemy-compatible PostgreSQL driver URL."""
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+psycopg2://", 1)
+    if url.startswith("postgresql://") and not url.startswith("postgresql+"):
+        return url.replace("postgresql://", "postgresql+psycopg2://", 1)
+    return url
+
+
+def get_database_url() -> str:
+    """PostgreSQL via DATABASE_URL, or local SQLite fallback."""
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if url:
+        return _normalize_database_url(url)
+    return f"sqlite:///{PORTFOLIO_DB}"
+
+
+DATABASE_URL = get_database_url()

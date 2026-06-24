@@ -1,21 +1,17 @@
 """
-Portfolio tracker — SQLite storage for positions and live P&L.
+Portfolio tracker — PostgreSQL (Supabase) or SQLite storage for positions and live P&L.
 """
 
 from datetime import datetime, timezone
 
 import pandas as pd
 import yfinance as yf
-from sqlalchemy import Column, DateTime, Float, Integer, String, create_engine
-from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy import Column, DateTime, Float, Integer, String
+from sqlalchemy.orm import Session
 
-import config
+from database import Base, get_session, init_db
 
 DEFAULT_PORTFOLIO_NAME = "default"
-
-
-class Base(DeclarativeBase):
-    pass
 
 
 class Position(Base):
@@ -29,13 +25,8 @@ class Position(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
-engine = create_engine(f"sqlite:///{config.PORTFOLIO_DB}", echo=False)
-SessionLocal = sessionmaker(bind=engine)
-Base.metadata.create_all(engine)
-
-
 def _session() -> Session:
-    return SessionLocal()
+    return get_session()
 
 
 def add_position(
@@ -221,3 +212,6 @@ def _position_to_dict(pos: Position) -> dict:
         "avg_cost_price": pos.avg_cost_price,
         "updated_at": pos.updated_at.isoformat() if pos.updated_at else None,
     }
+
+
+init_db()

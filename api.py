@@ -12,12 +12,18 @@ import alerts
 import main
 import portfolio
 import portfolio_risk
+from database import init_db
 
 app = FastAPI(
     title="Equity Research API",
     description="Single-ticker research pipeline, portfolio tracking, and risk analysis",
     version="1.5",
 )
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    init_db()
 
 
 class PositionInput(BaseModel):

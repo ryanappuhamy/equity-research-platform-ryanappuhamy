@@ -1,5 +1,5 @@
 """
-User-defined alert rules — SQLite storage and condition checking.
+User-defined alert rules — PostgreSQL (Supabase) or SQLite storage and condition checking.
 
 Alerts fire when a metric crosses a threshold for tickers in the portfolio.
 check_alerts runs the full research pipeline per ticker to collect current data.
@@ -7,18 +7,14 @@ check_alerts runs the full research pipeline per ticker to collect current data.
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, create_engine
-from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String
+from sqlalchemy.orm import Session
 
-import config
+from database import Base, get_session, init_db
 import main
 
 VALID_METRICS = frozenset({"pe_ttm", "price", "revenue_growth_yoy", "insider_filings"})
 VALID_OPERATORS = frozenset({"above", "below"})
-
-
-class Base(DeclarativeBase):
-    pass
 
 
 class Alert(Base):
@@ -34,13 +30,8 @@ class Alert(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
-engine = create_engine(f"sqlite:///{config.PORTFOLIO_DB}", echo=False)
-SessionLocal = sessionmaker(bind=engine)
-Base.metadata.create_all(engine)
-
-
 def _session() -> Session:
-    return SessionLocal()
+    return get_session()
 
 
 def _alert_to_dict(alert: Alert) -> dict:
