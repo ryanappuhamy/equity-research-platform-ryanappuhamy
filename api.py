@@ -69,6 +69,17 @@ def save_portfolio(body: PortfolioInput):
         return {"available": False, "note": str(e), "positions": [], "count": 0}
 
 
+@app.get("/portfolio")
+def get_portfolio():
+    """Return saved portfolio positions with live prices, P&L, and weights."""
+    try:
+        holdings = portfolio.update_prices()
+        return {"positions": holdings, "count": len(holdings)}
+    except Exception as e:
+        print(f"[error] API GET /portfolio failed: {e}")
+        return {"available": False, "note": str(e), "positions": [], "count": 0}
+
+
 @app.get("/portfolio/analysis")
 def portfolio_analysis():
     """Return risk decomposition for the saved portfolio."""
@@ -123,6 +134,30 @@ def create_alert(body: AlertInput):
     except Exception as e:
         print(f"[error] API POST /alerts failed: {e}")
         return {"available": False, "note": str(e)}
+
+
+@app.get("/alerts")
+def list_alerts():
+    """Return all saved alert rules."""
+    try:
+        rules = alerts.get_alerts()
+        return {"alerts": rules, "count": len(rules)}
+    except Exception as e:
+        print(f"[error] API GET /alerts failed: {e}")
+        return {"available": False, "note": str(e), "alerts": [], "count": 0}
+
+
+@app.delete("/alerts/{alert_id}")
+def remove_alert(alert_id: int):
+    """Delete an alert rule by ID."""
+    try:
+        result = alerts.delete_alert(alert_id)
+        if not result.get("deleted"):
+            return result
+        return {"deleted": True, "id": alert_id}
+    except Exception as e:
+        print(f"[error] API DELETE /alerts/{alert_id} failed: {e}")
+        return {"deleted": False, "note": str(e)}
 
 
 @app.get("/alerts/check")
