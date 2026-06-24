@@ -71,7 +71,7 @@ def _validate_operator(operator: str) -> str:
 
 
 def add_alert(ticker: str, metric: str, operator: str, threshold: float) -> dict:
-    """Create a new alert rule."""
+    """Create a new alert rule, or return the existing one if duplicate."""
     try:
         ticker = ticker.upper().strip()
         metric = _validate_metric(metric)
@@ -79,6 +79,14 @@ def add_alert(ticker: str, metric: str, operator: str, threshold: float) -> dict
         threshold = float(threshold)
 
         with _session() as db:
+            existing = (
+                db.query(Alert)
+                .filter_by(ticker=ticker, metric=metric, operator=operator, threshold=threshold)
+                .first()
+            )
+            if existing:
+                return _alert_to_dict(existing)
+
             alert = Alert(
                 ticker=ticker,
                 metric=metric,
@@ -124,6 +132,19 @@ def delete_alert(alert_id: int) -> dict:
         note = f"Failed to delete alert {alert_id}: {e}"
         print(f"[error] {note}")
         return {"deleted": False, "note": note}
+
+
+def clear_alerts() -> dict:
+    """Delete all alert rules from the database."""
+    try:
+        with _session() as db:
+            count = db.query(Alert).delete()
+            db.commit()
+            return {"cleared": True, "count": count}
+    except Exception as e:
+        note = f"Failed to clear alerts: {e}"
+        print(f"[error] {note}")
+        return {"cleared": False, "note": note}
 
 
 def _run_pipeline_for_ticker(ticker: str) -> dict:
