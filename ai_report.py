@@ -197,10 +197,14 @@ def _template_report(payload: dict, reason: str = "") -> str:
             )
         pt = analysts.get("price_target") or {}
         if pt.get("available"):
-            lines.append(
-                f"- **Price target (Finnhub):** mean ${pt.get('mean', 'N/A')}, "
+            label = "Finnhub" if pt.get("source") == "Finnhub" else pt.get("source", "Analyst")
+            line = (
+                f"- **Price target ({label}):** mean ${pt.get('mean', 'N/A')}, "
                 f"high ${pt.get('high', 'N/A')}, low ${pt.get('low', 'N/A')}"
             )
+            if pt.get("current") is not None:
+                line += f", current ${pt.get('current')}"
+            lines.append(line)
         est = analysts.get("earnings_estimates") or {}
         if est.get("available"):
             lines.append(

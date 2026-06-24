@@ -297,7 +297,39 @@ def get_price_target(ticker: str) -> dict:
             "last_updated": pt.get("lastUpdated"),
         }
     except Exception as e:
+        try:
+            import finnhub
+            if isinstance(e, finnhub.FinnhubAPIException) and getattr(e, "status_code", None) == 403:
+                note = f"Finnhub price target 403 for {ticker}"
+                print(f"[error] {note}")
+                return {"available": False, "note": note, "finnhub_status": 403}
+        except ImportError:
+            pass
         note = f"Finnhub price target failed for {ticker}: {e}"
+        print(f"[error] {note}")
+        return {"available": False, "note": note}
+
+
+def _price_target_yfinance(ticker: str) -> dict:
+    """Fallback price targets from yfinance when Finnhub is unavailable."""
+    try:
+        pt = yf.Ticker(ticker.upper()).analyst_price_targets
+        if not pt or pt.get("mean") is None:
+            note = f"yfinance returned no price target for {ticker}"
+            print(f"[error] {note}")
+            return {"available": False, "note": note}
+
+        return {
+            "available": True,
+            "source": "yfinance",
+            "mean": pt.get("mean"),
+            "high": pt.get("high"),
+            "low": pt.get("low"),
+            "median": pt.get("median"),
+            "current": pt.get("current"),
+        }
+    except Exception as e:
+        note = f"yfinance price target failed for {ticker}: {e}"
         print(f"[error] {note}")
         return {"available": False, "note": note}
 
@@ -352,6 +384,9 @@ def get_analyst_data(ticker: str) -> dict:
     if config.FINNHUB_API_KEY:
         consensus = get_analyst_consensus(ticker)
         price_target = get_price_target(ticker)
+        if not price_target.get("available") and price_target.get("finnhub_status") == 403:
+            print(f"[warn] Finnhub price target 403 for {ticker}, falling back to yfinance")
+            price_target = _price_target_yfinance(ticker)
         earnings = get_earnings_estimates(ticker)
         out["consensus"] = consensus
         out["price_target"] = price_target
@@ -359,6 +394,9 @@ def get_analyst_data(ticker: str) -> dict:
         if any(x.get("available") for x in (consensus, price_target, earnings)):
             out["available"] = True
             sources.append("Finnhub")
+        if price_target.get("available") and price_target.get("source") == "yfinance":
+            if "yfinance" not in sources:
+                sources.append("yfinance")
 
     if config.FMP_API_KEY:
         try:
