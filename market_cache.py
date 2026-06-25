@@ -1,7 +1,7 @@
 """
 Cache fundamentals and price data in the shared DB (Supabase / SQLite).
 
-Fresh entries (< CACHE_TTL_SECONDS) are returned instead of hitting yfinance again.
+Fundamentals are cached for 24 hours; price data uses a 30-minute TTL.
 """
 
 import json
@@ -13,7 +13,8 @@ from sqlalchemy import Column, DateTime, Integer, String, Text, UniqueConstraint
 
 from database import Base, get_session
 
-CACHE_TTL_SECONDS = 30 * 60
+PRICE_CACHE_TTL_SECONDS = 30 * 60
+FUNDAMENTALS_CACHE_TTL_SECONDS = 24 * 60 * 60
 
 
 class MarketDataCache(Base):
@@ -30,11 +31,11 @@ class MarketDataCache(Base):
     fetched_at = Column(DateTime(timezone=True), nullable=False)
 
 
-def _is_fresh(fetched_at: datetime) -> bool:
+def _is_fresh(fetched_at: datetime, ttl_seconds: int) -> bool:
     if fetched_at.tzinfo is None:
         fetched_at = fetched_at.replace(tzinfo=timezone.utc)
     age = datetime.now(timezone.utc) - fetched_at
-    return age < timedelta(seconds=CACHE_TTL_SECONDS)
+    return age < timedelta(seconds=ttl_seconds)
 
 
 def _get_row(ticker: str, data_type: str, cache_key: str = "") -> MarketDataCache | None:
@@ -84,7 +85,7 @@ def _set_row(ticker: str, data_type: str, payload: str, cache_key: str = "") -> 
 
 def get_fundamentals(ticker: str) -> dict | None:
     row = _get_row(ticker, "fundamentals")
-    if row and _is_fresh(row.fetched_at):
+    if row and _is_fresh(row.fetched_at, FUNDAMENTALS_CACHE_TTL_SECONDS):
         try:
             return json.loads(row.payload)
         except json.JSONDecodeError as e:
@@ -101,7 +102,7 @@ def set_fundamentals(ticker: str, data: dict) -> None:
 def get_price_history(ticker: str, years: int) -> pd.DataFrame | None:
     cache_key = f"{years}y"
     row = _get_row(ticker, "price_history", cache_key)
-    if row and _is_fresh(row.fetched_at):
+    if row and _is_fresh(row.fetched_at, PRICE_CACHE_TTL_SECONDS):
         try:
             return pd.read_json(StringIO(row.payload), orient="split")
         except (ValueError, json.JSONDecodeError) as e:
@@ -122,7 +123,7 @@ def get_live_prices(tickers: list[str]) -> dict[str, float] | None:
         return {}
     cache_key = ",".join(sorted(t.upper() for t in tickers))
     row = _get_row("_batch", "price_live", cache_key)
-    if row and _is_fresh(row.fetched_at):
+    if row and _is_fresh(row.fetched_at, PRICE_CACHE_TTL_SECONDS):
         try:
             raw = json.loads(row.payload)
             return {k: float(v) for k, v in raw.items()}
