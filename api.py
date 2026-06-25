@@ -5,7 +5,7 @@ FastAPI wrapper for the equity research backend.
 import logging
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -14,6 +14,7 @@ import alerts
 import main
 import portfolio
 import portfolio_risk
+import market_cache
 from database import init_db
 
 logger = logging.getLogger(__name__)
@@ -124,14 +125,35 @@ def portfolio_analysis():
 
 
 @app.get("/portfolio/brief")
-def portfolio_brief():
-    """Generate AI weekly brief for all portfolio holdings."""
+def portfolio_brief(
+    force: bool = False,
+    x_force_password: Optional[str] = Header(default=None, alias="X-Force-Password"),
+):
+    """Return AI weekly brief for portfolio holdings (cached up to 7 days)."""
     try:
         holdings = portfolio.update_prices()
         if not holdings:
             raise HTTPException(status_code=404, detail="No portfolio saved")
+
+        force_bypass = force and x_force_password == "ExtraPls"
+        cached_brief, fetched_at = market_cache.get_weekly_brief(holdings)
+
+        if not market_cache.should_regenerate_weekly_brief(fetched_at, force_bypass):
+            return {
+                "portfolio": holdings,
+                "brief": cached_brief,
+                "from_cache": True,
+                "cached_at": fetched_at.isoformat() if fetched_at else None,
+            }
+
         brief = ai_report.generate_portfolio_brief(holdings)
-        return {"portfolio": holdings, "brief": brief}
+        market_cache.set_weekly_brief(holdings, brief)
+        return {
+            "portfolio": holdings,
+            "brief": brief,
+            "from_cache": False,
+            "cached_at": None,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -139,6 +161,7 @@ def portfolio_brief():
         return {
             "portfolio": [],
             "brief": ai_report._portfolio_brief_template([], reason=str(e)),
+            "from_cache": False,
         }
 
 

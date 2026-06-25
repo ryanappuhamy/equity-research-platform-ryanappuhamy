@@ -1,7 +1,8 @@
 """
 Cache fundamentals and price data in the shared DB (Supabase / SQLite).
 
-Fundamentals are cached for 24 hours; price data uses a 30-minute TTL.
+Fundamentals are cached for 24 hours; price data uses a 30-minute TTL;
+weekly portfolio briefs are cached for 7 days.
 """
 
 import json
@@ -15,6 +16,8 @@ from database import Base, get_session
 
 PRICE_CACHE_TTL_SECONDS = 30 * 60
 FUNDAMENTALS_CACHE_TTL_SECONDS = 24 * 60 * 60
+WEEKLY_BRIEF_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+WEEKLY_BRIEF_TICKER = "_portfolio"
 
 
 class MarketDataCache(Base):
@@ -137,3 +140,55 @@ def set_live_prices(tickers: list[str], prices: dict[str, float]) -> None:
         return
     cache_key = ",".join(sorted(t.upper() for t in tickers))
     _set_row("_batch", "price_live", json.dumps(prices), cache_key)
+
+
+def _portfolio_brief_cache_key(holdings: list[dict]) -> str:
+    return ",".join(sorted(h["ticker"].upper() for h in holdings)) or "empty"
+
+
+def get_weekly_brief(holdings: list[dict]) -> tuple[str | None, datetime | None]:
+    """Return cached brief text and fetched_at, regardless of TTL."""
+    row = _get_row(WEEKLY_BRIEF_TICKER, "weekly_brief", _portfolio_brief_cache_key(holdings))
+    if not row:
+        return None, None
+    try:
+        payload = json.loads(row.payload)
+        brief = payload.get("brief")
+    except json.JSONDecodeError as e:
+        print(f"[warn] market cache corrupt weekly brief: {e}")
+        return None, None
+    fetched_at = row.fetched_at
+    if fetched_at.tzinfo is None:
+        fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+    return brief, fetched_at
+
+
+def weekly_brief_is_fresh(fetched_at: datetime | None) -> bool:
+    if fetched_at is None:
+        return False
+    return _is_fresh(fetched_at, WEEKLY_BRIEF_CACHE_TTL_SECONDS)
+
+
+def should_regenerate_weekly_brief(fetched_at: datetime | None, force_bypass: bool) -> bool:
+    """
+    Regenerate when force-bypass is authorized, cache is missing, cache is stale
+    on a Friday, or there is no cached entry at all.
+    """
+    if force_bypass:
+        return True
+    if fetched_at is None:
+        return True
+    if weekly_brief_is_fresh(fetched_at):
+        return False
+    return datetime.now(timezone.utc).weekday() == 4
+
+
+def set_weekly_brief(holdings: list[dict], brief: str) -> None:
+    if not brief:
+        return
+    _set_row(
+        WEEKLY_BRIEF_TICKER,
+        "weekly_brief",
+        json.dumps({"brief": brief}),
+        _portfolio_brief_cache_key(holdings),
+    )
