@@ -129,9 +129,21 @@ def get_fundamentals(ticker: str) -> dict:
     growth; yfinance only if Alpha Vantage fails or those fields are empty.
     """
     ticker = ticker.upper()
+    av_key_set = bool(config.ALPHA_VANTAGE_API_KEY)
+
     cached = market_cache.get_fundamentals(ticker)
     if cached is not None:
+        print(
+            f"[fundamentals] {ticker}: using cache (source={cached.get('source', 'unknown')}); "
+            f"ALPHA_VANTAGE_API_KEY set={av_key_set}"
+        )
         return cached
+
+    source = "Alpha Vantage" if av_key_set else "yfinance"
+    print(
+        f"[fundamentals] {ticker}: using {source}; "
+        f"ALPHA_VANTAGE_API_KEY set={av_key_set}"
+    )
 
     result: dict | None = None
     if config.ALPHA_VANTAGE_API_KEY:
