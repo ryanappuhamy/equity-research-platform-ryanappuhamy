@@ -3,7 +3,7 @@ Cache fundamentals and price data in the shared DB (Supabase / SQLite).
 
 Fundamentals, reports, SEC insider activity, Finnhub consensus, and FRED macro
 are cached for 24 hours; earnings transcripts for 7 days; price data for 30 minutes;
-weekly portfolio briefs for 7 days; sector lookups for 30 days; portfolio performance for 24 hours.
+weekly portfolio briefs for 7 days; sector lookups for 30 days; portfolio performance for 7 days.
 """
 
 import json
@@ -24,7 +24,7 @@ ANALYST_CONSENSUS_CACHE_TTL_SECONDS = 24 * 60 * 60
 EARNINGS_TRANSCRIPT_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 MACRO_DATA_CACHE_TTL_SECONDS = 24 * 60 * 60
 SECTOR_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
-PORTFOLIO_PERFORMANCE_CACHE_TTL_SECONDS = 24 * 60 * 60
+PORTFOLIO_PERFORMANCE_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 WEEKLY_BRIEF_TICKER = "_portfolio"
 GLOBAL_CACHE_TICKER = "_global"
 
@@ -290,6 +290,32 @@ def set_price_history(ticker: str, years: int, df: pd.DataFrame) -> None:
         return
     cache_key = f"{years}y"
     _set_row(ticker, "price_history", df.to_json(orient="split", date_format="iso"), cache_key)
+
+
+def get_price_history_stale(ticker: str, years: int) -> pd.DataFrame | None:
+    """Return cached price history regardless of TTL (fallback when yfinance is rate-limited)."""
+    ticker = ticker.upper()
+    cache_key = f"{years}y"
+    row = _get_row(ticker, "price_history", cache_key)
+    if row is None:
+        try:
+            with get_session() as db:
+                row = (
+                    db.query(MarketDataCache)
+                    .filter_by(ticker=ticker, data_type="price_history")
+                    .order_by(MarketDataCache.fetched_at.desc())
+                    .first()
+                )
+        except Exception as e:
+            print(f"[warn] market cache stale price history read failed for {ticker}: {e}")
+            return None
+    if not row:
+        return None
+    try:
+        return pd.read_json(StringIO(row.payload), orient="split")
+    except (ValueError, json.JSONDecodeError) as e:
+        print(f"[warn] market cache corrupt price history for {ticker}: {e}")
+        return None
 
 
 def get_live_prices(tickers: list[str]) -> dict[str, float] | None:

@@ -52,6 +52,26 @@ def _extract_single_close(data: pd.DataFrame, ticker: str) -> pd.Series | None:
         return None
 
 
+def _trim_closes(series: pd.Series, start: date, end: date) -> pd.Series | None:
+    if series.empty:
+        return None
+    idx = pd.to_datetime(series.index)
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_localize(None)
+    series = series.copy()
+    series.index = idx.normalize()
+    trimmed = series[(series.index >= pd.Timestamp(start)) & (series.index <= pd.Timestamp(end))]
+    trimmed = trimmed.dropna()
+    return trimmed if not trimmed.empty else None
+
+
+def _closes_from_cache(ticker: str, start: date, end: date) -> pd.Series | None:
+    df = market_cache.get_price_history_stale(ticker, config.PRICE_LOOKBACK_YEARS)
+    if df is None or df.empty or "Close" not in df.columns:
+        return None
+    return _trim_closes(df["Close"], start, end)
+
+
 def _download_ticker_closes(ticker: str, start: date, end: date) -> pd.Series | None:
     try:
         data = yf_download(
@@ -64,23 +84,38 @@ def _download_ticker_closes(ticker: str, start: date, end: date) -> pd.Series | 
         if data.empty:
             print(f"[warn] yfinance returned empty price history for {ticker}")
             return None
-        return _extract_single_close(data, ticker)
+        closes = _extract_single_close(data, ticker)
+        return _trim_closes(closes, start, end) if closes is not None else None
     except Exception as e:
-        print(f"[warn] yfinance price history failed for {ticker}, skipping: {e}")
+        print(f"[warn] yfinance price history failed for {ticker}: {e}")
         return None
+
+
+def _get_ticker_closes(ticker: str, start: date, end: date) -> pd.Series | None:
+    closes = _download_ticker_closes(ticker, start, end)
+    if closes is not None:
+        return closes
+
+    cached = _closes_from_cache(ticker, start, end)
+    if cached is not None:
+        print(f"[info] using cached price history for {ticker} after yfinance failure")
+        return cached
+
+    print(f"[warn] no live or cached price history for {ticker}, skipping")
+    return None
 
 
 def _download_closes(
     tickers: list[str], start: date, end: date
 ) -> tuple[pd.DataFrame, list[str]]:
-    """Download each ticker independently; skip failures (e.g. rate limits)."""
+    """Download each ticker independently; fall back to cache; skip remaining failures."""
     if not tickers:
         return pd.DataFrame(), []
 
     closes: dict[str, pd.Series] = {}
     missing: list[str] = []
     for ticker in tickers:
-        series = _download_ticker_closes(ticker, start, end)
+        series = _get_ticker_closes(ticker, start, end)
         if series is None:
             missing.append(ticker)
         else:
@@ -92,7 +127,17 @@ def _download_closes(
     return pd.DataFrame(closes).sort_index(), missing
 
 
-def _merge_series(nav: pd.Series, benchmark: pd.Series) -> list[dict]:
+def _merge_series(nav: pd.Series, benchmark: pd.Series | None) -> list[dict]:
+    if benchmark is None:
+        return [
+            {
+                "date": idx.strftime("%Y-%m-%d"),
+                "nav": round(float(val), 2),
+            }
+            for idx, val in nav.items()
+            if pd.notna(val)
+        ]
+
     merged = pd.DataFrame({"nav": nav, "benchmark": benchmark}).dropna()
     return [
         {
@@ -168,33 +213,39 @@ def compute_portfolio_performance(
             note = f"{note}: {', '.join(sorted(missing_holdings))}"
         return {"available": False, "note": note, "missing_tickers": sorted(missing_holdings)}
 
-    benchmark_closes = _download_ticker_closes(benchmark, start, end)
-    if benchmark_closes is None:
-        note = f"No {benchmark} benchmark data"
-        if missing_holdings:
-            note = f"{note}; missing holdings: {', '.join(sorted(missing_holdings))}"
-        return {
-            "available": False,
-            "note": note,
-            "missing_tickers": sorted(set(missing_holdings + [benchmark])),
-        }
-
     holding_prices = prices[valid].ffill()
     shares_series = pd.Series({t: shares_map[t] for t in valid})
     nav = (holding_prices * shares_series).sum(axis=1).dropna()
     if len(nav) < 2:
         return {"available": False, "note": "Insufficient NAV history"}
 
-    benchmark_prices = benchmark_closes.reindex(nav.index).ffill()
-    if benchmark_prices.isna().any():
-        return {"available": False, "note": f"Incomplete {benchmark} benchmark data"}
+    benchmark_closes = _get_ticker_closes(benchmark, start, end)
+    missing_tickers = list(missing_holdings)
+    benchmark_normalized = None
+    benchmark_note = None
 
-    benchmark_normalized = benchmark_prices / float(benchmark_prices.iloc[0]) * float(nav.iloc[0])
+    if benchmark_closes is None:
+        missing_tickers.append(benchmark)
+        benchmark_note = f"{benchmark} benchmark unavailable"
+    else:
+        benchmark_prices = benchmark_closes.reindex(nav.index).ffill()
+        if benchmark_prices.isna().any():
+            missing_tickers.append(benchmark)
+            benchmark_note = f"Incomplete {benchmark} benchmark data"
+        else:
+            benchmark_normalized = (
+                benchmark_prices / float(benchmark_prices.iloc[0]) * float(nav.iloc[0])
+            )
+
     metrics = _compute_metrics(nav)
 
-    partial_note = None
+    notes: list[str] = []
     if missing_holdings:
-        partial_note = f"Partial data — missing price history for: {', '.join(sorted(missing_holdings))}"
+        notes.append(
+            f"Partial data — missing price history for: {', '.join(sorted(missing_holdings))}"
+        )
+    if benchmark_note:
+        notes.append(benchmark_note)
 
     result = {
         "available": True,
@@ -203,14 +254,15 @@ def compute_portfolio_performance(
         "end_date": nav.index[-1].strftime("%Y-%m-%d"),
         "benchmark_ticker": benchmark,
         "benchmark": benchmark,
+        "benchmark_available": benchmark_normalized is not None,
         "series": _merge_series(nav, benchmark_normalized),
         "metrics": metrics,
-        "partial": bool(missing_holdings),
-        "missing_tickers": sorted(missing_holdings),
+        "partial": bool(notes),
+        "missing_tickers": sorted(set(missing_tickers)),
         **metrics,
     }
-    if partial_note:
-        result["note"] = partial_note
+    if notes:
+        result["note"] = "; ".join(notes)
 
     cache_payload = {k: v for k, v in result.items() if k != "from_cache"}
     market_cache.set_portfolio_performance(positions, cache_payload, benchmark)
@@ -221,7 +273,7 @@ def compute_portfolio_performance(
 def get_portfolio_performance(
     benchmark: str = Query(default=DEFAULT_BENCHMARK),
 ):
-    """Return daily portfolio NAV vs benchmark with performance metrics (cached 24h per benchmark)."""
+    """Return daily portfolio NAV vs benchmark with performance metrics (cached 7 days per benchmark)."""
     try:
         result = compute_portfolio_performance(benchmark=benchmark)
         if not result.get("available"):
