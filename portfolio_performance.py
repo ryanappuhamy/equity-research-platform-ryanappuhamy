@@ -6,11 +6,14 @@ from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
+from fastapi import APIRouter, HTTPException, Query
 
 import config
 import market_cache
 from portfolio import DEFAULT_PORTFOLIO_NAME, get_position_rows
 from yfinance_client import yf_download
+
+router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 
 DEFAULT_BENCHMARK = "SPY"
 ALLOWED_BENCHMARKS = frozenset({"SPY", "QQQ", "SOXX", "VTI"})
@@ -180,3 +183,22 @@ def compute_portfolio_performance(
     cache_payload = {k: v for k, v in result.items() if k != "from_cache"}
     market_cache.set_portfolio_performance(positions, cache_payload, benchmark)
     return result
+
+
+@router.get("/performance")
+def get_portfolio_performance(
+    benchmark: str = Query(default=DEFAULT_BENCHMARK),
+):
+    """Return daily portfolio NAV vs benchmark with performance metrics (cached 24h per benchmark)."""
+    try:
+        result = compute_portfolio_performance(benchmark=benchmark)
+        if not result.get("available"):
+            note = result.get("note", "")
+            if note.startswith("benchmark must be"):
+                raise HTTPException(status_code=400, detail=note)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[error] API GET /portfolio/performance failed: {e}")
+        return {"available": False, "note": str(e), "series": []}
