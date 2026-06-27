@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 import market_cache
-from yfinance_client import yf_download
+from yfinance_client import yf_download, yf_ticker_sector
 from sqlalchemy import Column, DateTime, Float, Integer, String
 from sqlalchemy.orm import Session
 
@@ -175,6 +175,35 @@ def _fetch_prices(tickers: list[str]) -> dict[str, float]:
         return {}
 
 
+def _resolve_sectors(tickers: list[str]) -> dict[str, str | None]:
+    """Resolve sector per ticker: fundamentals cache, then sector cache, then yfinance."""
+    stock_tickers = [t.upper() for t in tickers if t.upper() not in KNOWN_ETF_TICKERS]
+    if not stock_tickers:
+        return {}
+
+    sectors = market_cache.get_fundamentals_sectors(stock_tickers)
+
+    missing = [t for t in stock_tickers if not sectors.get(t)]
+    if missing:
+        cached = market_cache.get_sectors(missing)
+        for ticker in missing:
+            if cached.get(ticker):
+                sectors[ticker] = cached[ticker]
+
+    for ticker in [t for t in stock_tickers if not sectors.get(t)]:
+        try:
+            fetched = yf_ticker_sector(ticker)
+        except Exception as e:
+            print(f"[error] yfinance sector fetch failed for {ticker}: {e}")
+            continue
+        if fetched:
+            cached = market_cache.set_sector(ticker, fetched)
+            if cached:
+                sectors[ticker] = cached
+
+    return sectors
+
+
 def get_portfolio(portfolio_name: str = DEFAULT_PORTFOLIO_NAME) -> list[dict]:
     """Return all positions with current prices, value, P&L, and weight."""
     try:
@@ -185,8 +214,7 @@ def get_portfolio(portfolio_name: str = DEFAULT_PORTFOLIO_NAME) -> list[dict]:
 
             tickers = [r.ticker for r in rows]
             prices = _fetch_prices(tickers)
-            stock_tickers = [t for t in tickers if t.upper() not in KNOWN_ETF_TICKERS]
-            sectors = market_cache.get_fundamentals_sectors(stock_tickers)
+            sectors = _resolve_sectors(tickers)
 
             positions = []
             for row in rows:

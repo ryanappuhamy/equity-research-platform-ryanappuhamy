@@ -50,3 +50,24 @@ def yf_analyst_price_targets(ticker: str) -> dict | None:
 
 def yf_last_price(ticker: str) -> float:
     return float(yf_call(lambda: yf.Ticker(ticker.upper()).fast_info.last_price))
+
+
+def yf_ticker_sector(ticker: str) -> str | None:
+    """Sector from yfinance fast_info, falling back to info."""
+
+    def _fetch() -> str | None:
+        t = yf.Ticker(ticker.upper())
+        sector = None
+        try:
+            fast = t.fast_info
+            if hasattr(fast, "get"):
+                sector = fast.get("sector")
+            else:
+                sector = getattr(fast, "sector", None)
+        except Exception:
+            pass
+        if not sector:
+            sector = (t.info or {}).get("sector")
+        return sector if sector else None
+
+    return yf_call(_fetch)

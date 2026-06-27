@@ -3,7 +3,7 @@ Cache fundamentals and price data in the shared DB (Supabase / SQLite).
 
 Fundamentals, reports, SEC insider activity, Finnhub consensus, and FRED macro
 are cached for 24 hours; earnings transcripts for 7 days; price data for 30 minutes;
-weekly portfolio briefs for 7 days.
+weekly portfolio briefs and sector lookups for 7 days.
 """
 
 import json
@@ -23,6 +23,7 @@ INSIDER_ACTIVITY_CACHE_TTL_SECONDS = 24 * 60 * 60
 ANALYST_CONSENSUS_CACHE_TTL_SECONDS = 24 * 60 * 60
 EARNINGS_TRANSCRIPT_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 MACRO_DATA_CACHE_TTL_SECONDS = 24 * 60 * 60
+SECTOR_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 WEEKLY_BRIEF_TICKER = "_portfolio"
 GLOBAL_CACHE_TICKER = "_global"
 
@@ -142,6 +143,44 @@ def get_fundamentals_sectors(tickers: list[str]) -> dict[str, str | None]:
     except Exception as e:
         print(f"[warn] market cache sector lookup failed: {e}")
     return sectors
+
+
+def get_sectors(tickers: list[str]) -> dict[str, str | None]:
+    """Return sector from dedicated sector cache rows (7-day TTL). Missing/stale → None."""
+    if not tickers:
+        return {}
+    tickers = [t.upper() for t in tickers]
+    sectors: dict[str, str | None] = {t: None for t in tickers}
+    try:
+        with get_session() as db:
+            rows = (
+                db.query(MarketDataCache)
+                .filter(
+                    MarketDataCache.ticker.in_(tickers),
+                    MarketDataCache.data_type == "sector",
+                    MarketDataCache.cache_key == "",
+                )
+                .all()
+            )
+            for row in rows:
+                if not _is_fresh(row.fetched_at, SECTOR_CACHE_TTL_SECONDS):
+                    continue
+                try:
+                    payload = json.loads(row.payload)
+                    sectors[row.ticker] = _normalize_sector(payload.get("sector"))
+                except json.JSONDecodeError as e:
+                    print(f"[warn] market cache corrupt sector for {row.ticker}: {e}")
+    except Exception as e:
+        print(f"[warn] market cache sector read failed: {e}")
+    return sectors
+
+
+def set_sector(ticker: str, sector: str) -> str | None:
+    normalized = _normalize_sector(sector)
+    if not normalized:
+        return None
+    _set_row(ticker, "sector", json.dumps({"sector": normalized}))
+    return normalized
 
 
 def _get_json_cache(
